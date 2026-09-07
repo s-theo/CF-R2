@@ -1,0 +1,84 @@
+name: Sync Cloudflare R2
+
+on:
+  schedule:
+    - cron: "0 1 * * 1" # 每周一北京时间早上九点（UTC时间每周日晚上17:00）
+  workflow_dispatch: # 手动触发工作流
+
+jobs:
+  sync-r2:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set environment variables
+        run: |
+          echo "R2_ACCOUNT_ID=${{ secrets.ACCOUNT_ID }}" >> $GITHUB_ENV
+          echo "R2_ACCESS_KEY_ID=${{ secrets.ACCESS_KEY_ID }}" >> $GITHUB_ENV
+          echo "R2_SECRET_ACCESS_KEY=${{ secrets.SECRET_ACCESS_KEY }}" >> $GITHUB_ENV
+          echo "R2_BUCKET_NAME=${{ secrets.BUCKET_NAME }}" >> $GITHUB_ENV
+
+      - name: Install MinIO Client (mc)
+        run: |
+          wget https://dl.min.io/client/mc/release/linux-amd64/mc
+          chmod +x mc
+          sudo mv mc /usr/local/bin/
+
+      - name: Configure MinIO Client
+        run: |
+          mc alias set myr2 https://$R2_ACCOUNT_ID.r2.cloudflarestorage.com $R2_ACCESS_KEY_ID $R2_SECRET_ACCESS_KEY
+
+      - name: Sync R2 to GitHub
+        run: |
+          mc mirror myr2/$R2_BUCKET_NAME ./r2-sync --overwrite --remove
+
+      - name: Set DATE environment variable
+        run: echo "date=$(TZ='Asia/Shanghai' date +'%Y-%m-%d %H:%M:%S')" >> $GITHUB_ENV
+
+      - name: Commit and push changes
+        run: |
+          mkdir -p ~/.ssh
+          echo "${{ secrets.SSH_PRIVATE_KEY }}" > ~/.ssh/id_rsa
+          chmod 600 ~/.ssh/id_rsa
+          ssh-keyscan github.com >> ~/.ssh/known_hosts
+
+          cd r2-sync
+          git config --global user.name "github-actions[bot]"
+          git config --global user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git init -b main
+          git remote add origin git@github.com:${{ github.repository }}.git
+          git add .
+          git commit -m "sync Cloudflare R2 in ${{ env.date }}"
+          git push -f origin HEAD:main
+        env:
+          date: ${{ env.date }}
+
+      - name: Translate job status to Chinese
+        id: translate-status
+        run: |
+          if [ "${{ job.status }}" == "success" ]; then
+            echo "translated_status=成功" >> $GITHUB_ENV
+          elif [ "${{ job.status }}" == "failure" ]; then
+            echo "translated_status=失败" >> $GITHUB_ENV
+          elif [ "${{ job.status }}" == "cancelled" ]; then
+            echo "translated_status=取消" >> $GITHUB_ENV
+          else
+            echo "translated_status=未知" >> $GITHUB_ENV
+          fi
+
+      - name: Notify job status
+        if: always()
+        run: |
+          curl -X "POST" "${{ secrets.BARK_KEY }}" \
+              -H 'Content-Type: application/json; charset=utf-8' \
+              -d '{
+                    "body": "${{ github.repository }}于${{ env.date }}运行${{ env.translated_status }}",
+                    "title": "Cloudflare R2 同步",
+                    "badge": 1,
+                    "category": "Github Actions",
+                    "sound": "multiwayinvitation.caf",
+                    "icon": "https://i.theojs.net/cdn-cgi/image/format=png/logo/cloudflare-light.webp",
+                    "group": "Github Actions"
+                  }'
